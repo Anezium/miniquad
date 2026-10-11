@@ -92,6 +92,10 @@ pub mod android;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+// PS Vita (armv7-sony-vita-newlibeabihf) : vitaGL + SceCtrl/SceTouch. Ajout spike A.
+#[cfg(target_os = "vita")]
+pub mod vita;
+
 #[cfg(target_os = "android")]
 pub use android::*;
 

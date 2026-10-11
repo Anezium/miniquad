@@ -396,4 +396,10 @@ where
     unsafe {
         native::ios::run(conf, f);
     }
+
+    // PS Vita : ajout spike A (Alice Vita).
+    #[cfg(target_os = "vita")]
+    {
+        native::vita::run(&conf, f);
+    }
 }
