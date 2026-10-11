@@ -22,6 +22,7 @@ pub mod input;
 pub mod sys;
 
 pub use input::{InputConfig, LeftStickMode};
+pub use gl_loader::with_dxt5_uploads;
 
 use crate::{event::EventHandler, native::NativeDisplayData};
 use std::sync::{

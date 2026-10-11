@@ -24,12 +24,116 @@
 
 use super::sys;
 use crate::native::gl::{GLboolean, GLclampf, GLenum, GLint, GLsizei, GLuint};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+thread_local! { static DXT5_UPLOAD: Cell<bool> = const { Cell::new(false) }; }
+static DXT5_COUNT: AtomicUsize = AtomicUsize::new(0);
+static DXT5_SAVED: AtomicUsize = AtomicUsize::new(0);
+
+/// Opt in only while creating immutable RGBA8 textures. Dynamic atlases, movies,
+/// render targets and readback textures must stay outside this scope: vitaGL does
+/// not support ordinary subimage updates on DXT storage. The scope is thread-local
+/// and restores its previous state even if the closure unwinds.
+pub fn with_dxt5_uploads<T>(upload: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DXT5_UPLOAD.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(DXT5_UPLOAD.with(|flag| flag.replace(true)));
+    upload()
+}
+
+unsafe extern "C" {
+    #[link_name = "glTexImage2D"]
+    fn vgl_tex_image_2d(
+        target: GLenum,
+        level: GLint,
+        internal_format: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        border: GLint,
+        format: GLenum,
+        pixel_type: GLenum,
+        data: *const core::ffi::c_void,
+    );
+}
+
+unsafe extern "C" fn shim_glTexImage2D(
+    target: GLenum,
+    level: GLint,
+    mut internal_format: GLint,
+    width: GLsizei,
+    height: GLsizei,
+    border: GLint,
+    format: GLenum,
+    pixel_type: GLenum,
+    data: *const core::ffi::c_void,
+) {
+    use crate::native::gl::{GL_RGBA, GL_RGBA8, GL_TEXTURE_2D, GL_UNSIGNED_BYTE};
+    // Restrict to POT textures >= one block: vitaGL pads NPOT inputs and its
+    // compressor reads full 4x4 blocks. Leave other GL formats untouched.
+    if DXT5_UPLOAD.with(Cell::get)
+        && target == GL_TEXTURE_2D
+        && level == 0
+        && border == 0
+        && !data.is_null()
+        && format == GL_RGBA
+        && pixel_type == GL_UNSIGNED_BYTE
+        && (internal_format == GL_RGBA as GLint || internal_format == GL_RGBA8 as GLint)
+        && width >= 4
+        && height >= 4
+        && (width as u32).is_power_of_two()
+        && (height as u32).is_power_of_two()
+    {
+        internal_format = 0x83F3; // GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
+        let saved = width as usize * height as usize * 3;
+        let total = DXT5_SAVED.fetch_add(saved, Ordering::Relaxed) + saved;
+        let count = DXT5_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if count == 1 || count % 64 == 0 {
+            eprintln!("[miniquad/vita] DXT5 uploads={count} estimated_saved_bytes={total}");
+        }
+    }
+    unsafe {
+        vgl_tex_image_2d(
+            target,
+            level,
+            internal_format,
+            width,
+            height,
+            border,
+            format,
+            pixel_type,
+            data,
+        )
+    };
+}
 use std::ffi::CString;
 
 type Proc = unsafe extern "C" fn();
 
 /// Résolveur passé à `load_gl_funcs`.
 pub(crate) fn get_proc_address(name: &str) -> Option<Proc> {
+    if name == "glTexImage2D" {
+        return Some(unsafe {
+            std::mem::transmute::<
+                unsafe extern "C" fn(
+                    GLenum,
+                    GLint,
+                    GLint,
+                    GLsizei,
+                    GLsizei,
+                    GLint,
+                    GLenum,
+                    GLenum,
+                    *const core::ffi::c_void,
+                ),
+                Proc,
+            >(shim_glTexImage2D)
+        });
+    }
     let cname = CString::new(name).ok()?;
     let addr = unsafe { sys::vglGetProcAddress(cname.as_ptr()) };
     if !addr.is_null() {
@@ -51,9 +155,9 @@ fn fallback(name: &str) -> Option<Proc> {
         Some(match name {
             // Appelée à chaque création de shader (load_shader_internal). Sans effet notable :
             // miniquad supprime les shaders juste après, vitaGL les libère avec le programme.
-            "glDetachShader" => std::mem::transmute::<extern "C" fn(GLuint, GLuint), Proc>(
-                shim_glDetachShader,
-            ),
+            "glDetachShader" => {
+                std::mem::transmute::<extern "C" fn(GLuint, GLuint), Proc>(shim_glDetachShader)
+            }
             // Utilisée pour les passes de rendu (MRT / resolve). vitaGL n'a qu'un attachement
             // couleur : rien à sélectionner.
             "glDrawBuffers" => std::mem::transmute::<extern "C" fn(GLsizei, *const GLenum), Proc>(
@@ -65,10 +169,11 @@ fn fallback(name: &str) -> Option<Proc> {
                 Proc,
             >(shim_glBlendColor),
             // Render textures avec sample_count > 1 : on retombe sur un renderbuffer sans MSAA.
-            "glRenderbufferStorageMultisample" => std::mem::transmute::<
-                extern "C" fn(GLenum, GLsizei, GLenum, GLsizei, GLsizei),
-                Proc,
-            >(shim_glRenderbufferStorageMultisample),
+            "glRenderbufferStorageMultisample" => {
+                std::mem::transmute::<extern "C" fn(GLenum, GLsizei, GLenum, GLsizei, GLsizei), Proc>(
+                    shim_glRenderbufferStorageMultisample,
+                )
+            }
             // Attributs entiers (VertexFormat::Int*) : GLES2 n'a que des attributs flottants.
             // On les passe en flottants non normalisés (valeurs converties, pas réinterprétées).
             "glVertexAttribIPointer" => std::mem::transmute::<
