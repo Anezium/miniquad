@@ -45,13 +45,20 @@ Aucune dépendance ajoutée (pas de `libc` ni de `vitasdk-sys` sur la cible Vita
 
 ### Free memory logging (`vita-input`)
 
-`VitaConfig::log_memory_every` defaults to `Some(600)`. The backend logs free memory to
-stderr once before vitaGL initialization, then after every 600 rendered/swapped frames.
-The line reports `user`, `cdram` and `phycont` in bytes from `sceKernelGetFreeMemorySize`.
-The startup sample already includes allocations made by the application before `miniquad::start`.
-`None` disables both startup and periodic samples; `Some(0)` samples every rendered frame.
-The counter is independent of frame-time logging and does not count idle iterations of the
-blocking event loop. Failed SDK calls report their error code without printing invalid sizes.
+`VitaConfig::log_memory_every` defaults to `Some(10)` and now counts wall-clock
+seconds, not rendered frames. A separate 64 KiB-stack thread samples during slow or
+blocked loading. `None` disables the logger; `Some(0)` uses one second. Forced samples
+run before initialization, immediately before the first `vglSwapBuffers`, and in a
+panic hook that chains the previous hook. Rust allocation aborts and hardware faults
+do not necessarily invoke the panic hook.
+
+Each line includes the process timestamp, reason, kernel return code and free user,
+CDRAM and physically contiguous bytes; newlib `mallinfo` arena, uordblks (used) and
+fordblks (free); and `vglMemFree` for VRAM, RAM, PHYCONT, BUDGET and EXTERNAL.
+At vitaGL dca4b9d, `VGL_MEM_SLOW` is absent: enum value 2 is `VGL_MEM_PHYCONT`.
+EXTERNAL always returns zero in that implementation, not a measurement of heap
+exhaustion. Pool queries wait until vitaGL initialization has completed. Samples
+are sequential observations of active allocators, not an atomic global snapshot.
 
 The FFI uses the four C `int` fields from `psp2/kernel/sysmem.h`, initializes `size` to 0x10,
 checks the structure size at compile time, and links `SceSysmem_stub` for the new import.
