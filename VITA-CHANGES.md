@@ -67,3 +67,10 @@ Chaque fonction absente est signalée une fois sur stderr au démarrage
 fontdue 0.9.4, glam 0.27.0 (`scalar-math`), image 0.24.9 (png, tga), png 0.17.16, quad-rand 0.2.3,
 ttf-parser 0.25.1. Si la feature `audio` est activée un jour, quad-snd n'a pas de backend Vita :
 il faudra un backend `sceAudioOut` (jalon 6 du brief).
+
+## 2026-10-11 — fix: vglInitExtended return value
+
+`vglInitExtended` returns GL_FALSE on a normal init and GL_TRUE only when the resolution was clamped
+(vitaGL `source/vgl.c`, `res_fallback`). The backend treated GL_FALSE as a failure and panicked on every
+successful init; found on the first on-console run of the macroquad sample (ALICEMQ01, C2-12828-1).
+Now logged on GL_TRUE, never fatal.

@@ -115,17 +115,22 @@ where
         if let Some(size) = cfg.circular_pool_size {
             sys::vglSetCircularPoolSize(size);
         }
-        let ok = sys::vglInitExtended(
+        // vitaGL (source/vgl.c, vglInitWithCustomSizes) returns `res_fallback`: GL_FALSE on a
+        // normal init, GL_TRUE when the requested resolution exceeded the display maximum and was
+        // clamped. It never reports failure through this value (the only GL_FALSE early return
+        // is "already inited"). An earlier revision panicked on GL_FALSE, i.e. on every
+        // successful init; that crashed the first on-console run (2026-10-11).
+        let res_fallback = sys::vglInitExtended(
             cfg.legacy_pool_size,
             cfg.width,
             cfg.height,
             cfg.ram_threshold,
             msaa_mode(conf.sample_count),
         );
-        if ok == sys::GL_FALSE {
-            panic!(
-                "[miniquad/vita] vglInitExtended({}, {}x{}, ram_threshold={:#x}) a échoué",
-                cfg.legacy_pool_size, cfg.width, cfg.height, cfg.ram_threshold
+        if res_fallback == sys::GL_TRUE {
+            eprintln!(
+                "[miniquad/vita] vglInitExtended: {}x{} exceeds the display maximum, vitaGL clamped it",
+                cfg.width, cfg.height
             );
         }
         // swap_interval : None ou != 0 → V-Sync.
