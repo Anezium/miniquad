@@ -14,7 +14,9 @@ Branche `vita-0.4.8` du fork Anezium/miniquad, créée sur `cc6f8d1f`. Les sourc
 sont celles de l'archive crates.io : seuls les fichiers que cargo ajoute à l'empaquetage diffèrent
 (`Cargo.toml` normalisé, `Cargo.toml.orig` identique au `Cargo.toml` du dépôt, `.cargo_vcs_info.json`,
 `Cargo.lock`). Trois commits par-dessus : le module `native/vita`, son câblage sous
-`cfg(target_os = "vita")`, ce fichier.
+`cfg(target_os = "vita")`, ce fichier. Un correctif complémentaire conserve les trois lignes
+de provenance en tête de `src/lib.rs` et `src/native.rs` : les emplacements de panic incorporés
+dans l’ELF restent ainsi identiques à ceux de la copie initiale lors de la migration.
 
 Utilisation : sous-module `spike-a/miniquad` du dépôt Alice-American-McGees-PSVita-Port, et
 `[patch.crates-io] miniquad = { path = "../miniquad" }` dans le crate consommateur

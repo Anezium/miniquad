@@ -1,3 +1,6 @@
+// Origine : miniquad 0.4.8 (crates.io, git cc6f8d1f), fork pour PS Vita.
+// Modifications pour PS Vita : branche `cfg(target_os = "vita")` dans `start()`.
+//   Voir VITA-CHANGES.md.
 #![doc = include_str!("../README.md")]
 #![allow(
     clippy::collapsible_if,

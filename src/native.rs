@@ -1,3 +1,6 @@
+// Origine : miniquad 0.4.8 (crates.io, git cc6f8d1f), fork pour PS Vita.
+// Modifications pour PS Vita : module `vita` sous `cfg(target_os = "vita")`.
+//   Voir VITA-CHANGES.md.
 #![allow(dead_code)]
 
 use std::sync::mpsc;
