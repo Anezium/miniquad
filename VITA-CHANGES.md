@@ -43,6 +43,19 @@ tout l'ajout est derrière `#[cfg(target_os = "vita")]` (valeur vérifiée avec
 Aucune dépendance ajoutée (pas de `libc` ni de `vitasdk-sys` sur la cible Vita) ; `build.rs` et
 `Cargo.toml` inchangés.
 
+### Free memory logging (`vita-input`)
+
+`VitaConfig::log_memory_every` defaults to `Some(600)`. The backend logs free memory to
+stderr once before vitaGL initialization, then after every 600 rendered/swapped frames.
+The line reports `user`, `cdram` and `phycont` in bytes from `sceKernelGetFreeMemorySize`.
+The startup sample already includes allocations made by the application before `miniquad::start`.
+`None` disables both startup and periodic samples; `Some(0)` samples every rendered frame.
+The counter is independent of frame-time logging and does not count idle iterations of the
+blocking event loop. Failed SDK calls report their error code without printing invalid sizes.
+
+The FFI uses the four C `int` fields from `psp2/kernel/sysmem.h`, initializes `size` to 0x10,
+checks the structure size at compile time, and links `SceSysmem_stub` for the new import.
+
 ### Fonctions GL
 
 miniquad 0.4.8 charge 125 fonctions par nom. 111 sont dans la table de `vglGetProcAddress`

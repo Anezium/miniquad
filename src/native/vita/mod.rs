@@ -44,6 +44,9 @@ pub struct VitaConfig {
     pub circular_pool_size: Option<u32>,
     /// Journalise le temps de frame moyen sur stderr toutes les N frames (None = jamais).
     pub log_frame_time_every: Option<u32>,
+    /// Log free user, CDRAM and physically contiguous memory (bytes) to stderr at startup
+    /// and every N rendered frames. None disables logging; Some(0) logs every frame.
+    pub log_memory_every: Option<u32>,
     /// Mapping des entrées.
     pub input: InputConfig,
 }
@@ -57,6 +60,7 @@ impl Default for VitaConfig {
             ram_threshold: 0x0100_0000,
             circular_pool_size: None,
             log_frame_time_every: None,
+            log_memory_every: Some(600),
             input: InputConfig::default(),
         }
     }
@@ -105,11 +109,31 @@ fn msaa_mode(sample_count: i32) -> core::ffi::c_int {
     }
 }
 
+fn log_free_memory() {
+    let mut info = sys::SceKernelFreeMemorySizeInfo {
+        size: core::mem::size_of::<sys::SceKernelFreeMemorySizeInfo>() as core::ffi::c_int,
+        ..Default::default()
+    };
+    let result = unsafe { sys::sceKernelGetFreeMemorySize(&mut info) };
+    if result < 0 {
+        eprintln!("[miniquad/vita] sceKernelGetFreeMemorySize failed: {:#x}", result);
+    } else {
+        eprintln!(
+            "[miniquad/vita] free memory (bytes): user={} cdram={} phycont={}",
+            info.size_user, info.size_cdram, info.size_phycont
+        );
+    }
+}
+
 pub fn run<F>(conf: &crate::conf::Conf, f: F)
 where
     F: 'static + FnOnce() -> Box<dyn EventHandler>,
 {
     let cfg = CONFIG.lock().unwrap().take().unwrap_or_default();
+
+    if cfg.log_memory_every.is_some() {
+        log_free_memory();
+    }
 
     unsafe {
         if let Some(size) = cfg.circular_pool_size {
@@ -156,6 +180,7 @@ where
     let mut event_handler = f();
 
     let mut frames: u32 = 0;
+    let mut memory_frames: u32 = 0;
     let mut window_start = Instant::now();
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
@@ -182,6 +207,13 @@ where
             event_handler.update();
             event_handler.draw();
             unsafe { sys::vglSwapBuffers(sys::GL_FALSE) };
+            if let Some(every) = cfg.log_memory_every {
+                memory_frames += 1;
+                if memory_frames >= every.max(1) {
+                    log_free_memory();
+                    memory_frames = 0;
+                }
+            }
         } else {
             // Boucle « bloquante » émulée : pas d'attente d'événement sur Vita, on scrute à ~1 kHz.
             std::thread::sleep(std::time::Duration::from_millis(1));

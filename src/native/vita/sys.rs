@@ -7,6 +7,7 @@
 //! Prototypes et structures recopiés de VitaSDK 2026.08 :
 //! `$VITASDK/arm-vita-eabi/include/vitaGL.h` (vitaGL dca4b9d),
 //! `psp2common/ctrl.h`, `psp2/touch.h`, `psp2/kernel/processmgr.h`.
+//! Free memory information: `psp2/kernel/sysmem.h`.
 //!
 //! Liaison : tout est statique (la cible n'a pas de liaison dynamique). La liste et l'ordre
 //! sont ceux validés par spike-a/triangle/src/vgl.rs (jalon 1), plus SceCtrl/SceTouch/SceLibKernel
@@ -45,6 +46,7 @@ pub const SCE_GXM_MULTISAMPLE_4X: c_int = 2;
 #[link(name = "SceCtrl_stub", kind = "static", modifiers = "-bundle")]
 #[link(name = "SceTouch_stub", kind = "static", modifiers = "-bundle")]
 #[link(name = "SceLibKernel_stub", kind = "static", modifiers = "-bundle")]
+#[link(name = "SceSysmem_stub", kind = "static", modifiers = "-bundle")]
 #[link(name = "stdc++")]
 extern "C" {
     // --- vitaGL (vitaGL.h) ---
@@ -78,7 +80,21 @@ extern "C" {
     // --- SceKernel (psp2/kernel/processmgr.h) ---
     /// Temps du processus en microsecondes (monotone).
     pub fn sceKernelGetProcessTimeWide() -> u64;
+    // --- SceSysmem (psp2/kernel/sysmem.h) ---
+    /// Free memory in bytes. Set info.size before calling; returns 0 on success, < 0 on error.
+    pub fn sceKernelGetFreeMemorySize(info: *mut SceKernelFreeMemorySizeInfo) -> c_int;
 }
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SceKernelFreeMemorySizeInfo {
+    pub size: c_int,
+    pub size_user: c_int,
+    pub size_cdram: c_int,
+    pub size_phycont: c_int,
+}
+
+const _: () = assert!(core::mem::size_of::<SceKernelFreeMemorySizeInfo>() == 0x10);
 
 // SceCtrlPadInputMode
 pub const SCE_CTRL_MODE_DIGITAL: c_int = 0;
