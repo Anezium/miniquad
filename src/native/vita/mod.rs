@@ -247,6 +247,7 @@ where
     let mut frames: u32 = 0;
     let mut first_swap = true;
     let mut window_start = Instant::now();
+    let mut phase_us = [0u64; 3];
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
         while let Ok(request) = rx.try_recv() {
@@ -269,13 +270,22 @@ where
 
         if !conf.platform.blocking_event_loop || display.update_requested {
             display.update_requested = false;
+            let profiling = cfg.log_frame_time_every.is_some();
+            let update_start = profiling.then(Instant::now);
             event_handler.update();
+            let draw_start = profiling.then(Instant::now);
             event_handler.draw();
+            let swap_start = profiling.then(Instant::now);
             if first_swap && cfg.log_memory_every.is_some() {
                 log_free_memory("first_swap");
                 first_swap = false;
             }
             unsafe { sys::vglSwapBuffers(sys::GL_FALSE) };
+            if let (Some(update), Some(draw), Some(swap)) = (update_start, draw_start, swap_start) {
+                phase_us[0] += draw.duration_since(update).as_micros() as u64;
+                phase_us[1] += swap.duration_since(draw).as_micros() as u64;
+                phase_us[2] += swap.elapsed().as_micros() as u64;
+            }
         } else {
             // Boucle « bloquante » émulée : pas d'attente d'événement sur Vita, on scrute à ~1 kHz.
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -286,10 +296,15 @@ where
             if frames >= every.max(1) {
                 let elapsed = window_start.elapsed();
                 eprintln!(
-                    "[miniquad/vita] {} frames, {:.2} ms/frame",
+                    "[miniquad/vita] {} frames, {:.2} ms/frame fps={:.3} update_ms={:.3} draw_ms={:.3} swap_ms={:.3}",
                     frames,
-                    elapsed.as_secs_f64() * 1000.0 / frames as f64
+                    elapsed.as_secs_f64() * 1000.0 / frames as f64,
+                    frames as f64 / elapsed.as_secs_f64(),
+                    phase_us[0] as f64 / frames as f64 / 1000.0,
+                    phase_us[1] as f64 / frames as f64 / 1000.0,
+                    phase_us[2] as f64 / frames as f64 / 1000.0
                 );
+                phase_us = [0; 3];
                 frames = 0;
                 window_start = Instant::now();
             }
