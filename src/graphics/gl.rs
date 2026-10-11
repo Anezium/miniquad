@@ -24,6 +24,8 @@ pub mod raw_gl {
 #[derive(Clone, Copy, Debug)]
 struct Buffer {
     gl_buf: GLuint,
+    #[cfg(target_os = "vita")]
+    compact_stream: bool,
     buffer_type: BufferType,
     size: usize,
     // Dimension of the indices for this buffer,
@@ -1352,6 +1354,12 @@ impl RenderingBackend for GlContext {
             BufferType::IndexBuffer => panic!("unsupported index buffer dimension"),
             BufferType::VertexBuffer => None,
         };
+        #[cfg(target_os = "vita")]
+        let compact_stream = crate::native::vita::compact_stream_buffers()
+            && matches!(usage, BufferUsage::Stream)
+            && matches!(data, BufferSource::Empty { .. });
+        #[cfg(not(target_os = "vita"))]
+        let compact_stream = false;
         let mut gl_buf: u32 = 0;
 
         unsafe {
@@ -1359,7 +1367,12 @@ impl RenderingBackend for GlContext {
             self.cache.store_buffer_binding(gl_target);
             self.cache.bind_buffer(gl_target, gl_buf, index_type);
 
-            glBufferData(gl_target, size as _, std::ptr::null() as *const _, gl_usage);
+            // macroquad creates one buffer pair per draw call at its global
+            // maximum capacity. On Vita defer opted-in empty stream storage
+            // until we know the actual draw payload; retain logical bounds.
+            if !compact_stream {
+                glBufferData(gl_target, size as _, std::ptr::null() as *const _, gl_usage);
+            }
             if let BufferSource::Slice(data) = data {
                 debug_assert!(data.is_slice);
                 glBufferSubData(gl_target, 0, size as _, data.ptr as _);
@@ -1369,6 +1382,8 @@ impl RenderingBackend for GlContext {
 
         let buffer = Buffer {
             gl_buf,
+            #[cfg(target_os = "vita")]
+            compact_stream,
             buffer_type: type_,
             size,
             index_type,
@@ -1398,6 +1413,17 @@ impl RenderingBackend for GlContext {
         self.cache.store_buffer_binding(gl_target);
         self.cache
             .bind_buffer(gl_target, buffer.gl_buf, buffer.index_type);
+        #[cfg(target_os = "vita")]
+        if buffer.compact_stream {
+            if size != 0 {
+                // glBufferData retires in-flight storage through vitaGL's own
+                // lifetime handling. Only the uploaded bytes need backing;
+                // a later larger payload reallocates without truncation.
+                unsafe { glBufferData(gl_target, size as _, data.ptr as _, GL_STREAM_DRAW) };
+            }
+            self.cache.restore_buffer_binding(gl_target);
+            return;
+        }
         unsafe { glBufferSubData(gl_target, 0, size as _, data.ptr as _) };
         self.cache.restore_buffer_binding(gl_target);
     }

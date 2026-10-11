@@ -52,6 +52,11 @@ pub struct VitaConfig {
     /// on panic, and every N wall-clock seconds on a separate thread (also during loading).
     /// None disables logging; Some(0) uses a one-second interval.
     pub log_memory_every: Option<u32>,
+    /// Allocate initially empty stream buffers only when updated, sized to the
+    /// uploaded payload. Opt in for renderers such as macroquad that replace
+    /// the whole draw payload: bytes beyond the latest update are discarded.
+    /// buffer_size still reports the logical maximum; update bounds stay checked.
+    pub compact_stream_buffers: bool,
     /// Mapping des entrées.
     pub input: InputConfig,
 }
@@ -66,15 +71,22 @@ impl Default for VitaConfig {
             circular_pool_size: None,
             log_frame_time_every: None,
             log_memory_every: Some(10),
+            compact_stream_buffers: false,
             input: InputConfig::default(),
         }
     }
 }
 
 static CONFIG: Mutex<Option<VitaConfig>> = Mutex::new(None);
+static COMPACT_STREAM_BUFFERS: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn compact_stream_buffers() -> bool {
+    COMPACT_STREAM_BUFFERS.load(Ordering::Relaxed)
+}
 
 /// Fixe la configuration Vita. À appeler avant `miniquad::start`.
 pub fn set_config(config: VitaConfig) {
+    COMPACT_STREAM_BUFFERS.store(config.compact_stream_buffers, Ordering::Relaxed);
     *CONFIG.lock().unwrap() = Some(config);
 }
 

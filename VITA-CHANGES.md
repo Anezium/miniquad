@@ -109,3 +109,19 @@ rustc --edition 2021 --test tests/vita_dxt5_shim.rs -o /tmp/vita-dxt5-shim-tests
 ```
 
 Console validation is recorded in the parent project's DECISIONS.md.
+
+## Compact empty stream buffers (village iteration 3)
+
+`VitaConfig::compact_stream_buffers` defaults to false. Opting in defers storage
+for `BufferUsage::Stream` + `BufferSource::Empty` until `buffer_update`, and
+replaces it using `glBufferData` with the uploaded byte count. Logical maximum
+size, bounds checks and index element type stay unchanged. The old GPU storage
+is retired by vitaGL as usual; this does not enable BUFFERS_SPEEDHACK or overwrite
+in-flight storage. Other buffer usages and initially populated streams keep their
+existing path. Other platforms are unchanged.
+
+This mode is for whole draw payload updates, as performed by macroquad: bytes
+beyond the latest upload are discarded. The buffer must be updated before drawing
+from it. It avoids reserving the game's global 60000 vertices and 180000 indices
+(2400000 + 360000 bytes) for every small macroquad draw call. Larger draw payloads
+still allocate their full size; no mesh is clamped by this change.
