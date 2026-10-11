@@ -24,7 +24,10 @@ pub mod sys;
 pub use input::{InputConfig, LeftStickMode};
 
 use crate::{event::EventHandler, native::NativeDisplayData};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Instant;
 
 /// Paramètres spécifiques à la Vita (taille d'écran, mémoire vitaGL, entrées).
@@ -44,8 +47,9 @@ pub struct VitaConfig {
     pub circular_pool_size: Option<u32>,
     /// Journalise le temps de frame moyen sur stderr toutes les N frames (None = jamais).
     pub log_frame_time_every: Option<u32>,
-    /// Log free user, CDRAM and physically contiguous memory (bytes) to stderr at startup
-    /// and every N rendered frames. None disables logging; Some(0) logs every frame.
+    /// Log kernel, newlib and vitaGL free memory at startup, before the first swap,
+    /// on panic, and every N wall-clock seconds on a separate thread (also during loading).
+    /// None disables logging; Some(0) uses a one-second interval.
     pub log_memory_every: Option<u32>,
     /// Mapping des entrées.
     pub input: InputConfig,
@@ -60,7 +64,7 @@ impl Default for VitaConfig {
             ram_threshold: 0x0100_0000,
             circular_pool_size: None,
             log_frame_time_every: None,
-            log_memory_every: Some(600),
+            log_memory_every: Some(10),
             input: InputConfig::default(),
         }
     }
@@ -109,18 +113,37 @@ fn msaa_mode(sample_count: i32) -> core::ffi::c_int {
     }
 }
 
-fn log_free_memory() {
+static VGL_READY: AtomicBool = AtomicBool::new(false);
+
+fn log_free_memory(reason: &str) {
     let mut info = sys::SceKernelFreeMemorySizeInfo {
         size: core::mem::size_of::<sys::SceKernelFreeMemorySizeInfo>() as core::ffi::c_int,
         ..Default::default()
     };
     let result = unsafe { sys::sceKernelGetFreeMemorySize(&mut info) };
-    if result < 0 {
-        eprintln!("[miniquad/vita] sceKernelGetFreeMemorySize failed: {:#x}", result);
+    let heap = unsafe { sys::mallinfo() };
+    let now = unsafe { sys::sceKernelGetProcessTimeWide() };
+    // Do not inspect vitaGL's heaps while vglInitExtended is creating them.
+    if VGL_READY.load(Ordering::Acquire) {
+        let (vram, ram, phycont, budget, external) = unsafe {
+            (
+                sys::vglMemFree(sys::VGL_MEM_VRAM),
+                sys::vglMemFree(sys::VGL_MEM_RAM),
+                sys::vglMemFree(sys::VGL_MEM_PHYCONT),
+                sys::vglMemFree(sys::VGL_MEM_BUDGET),
+                sys::vglMemFree(sys::VGL_MEM_EXTERNAL),
+            )
+        };
+        eprintln!(
+            "[miniquad/vita] memory reason={} time_us={} kernel_rc={} user={} cdram={} phycont={} newlib_arena={} newlib_uordblks={} newlib_fordblks={} vgl_VRAM={} vgl_RAM={} vgl_PHYCONT={} vgl_BUDGET={} vgl_EXTERNAL={}",
+            reason, now, result, info.size_user, info.size_cdram, info.size_phycont,
+            heap.arena, heap.uordblks, heap.fordblks, vram, ram, phycont, budget, external
+        );
     } else {
         eprintln!(
-            "[miniquad/vita] free memory (bytes): user={} cdram={} phycont={}",
-            info.size_user, info.size_cdram, info.size_phycont
+            "[miniquad/vita] memory reason={} time_us={} kernel_rc={} user={} cdram={} phycont={} newlib_arena={} newlib_uordblks={} newlib_fordblks={} vgl=not_initialized",
+            reason, now, result, info.size_user, info.size_cdram, info.size_phycont,
+            heap.arena, heap.uordblks, heap.fordblks
         );
     }
 }
@@ -131,8 +154,35 @@ where
 {
     let cfg = CONFIG.lock().unwrap().take().unwrap_or_default();
 
-    if cfg.log_memory_every.is_some() {
-        log_free_memory();
+    let memory_running = Arc::new(AtomicBool::new(true));
+    if let Some(seconds) = cfg.log_memory_every {
+        eprintln!("[miniquad/vita] memory: VGL_MEM_SLOW absent in dca4b9d; using VGL_MEM_PHYCONT; vgl_EXTERNAL=0 means not measured by vitaGL");
+        log_free_memory("startup");
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            log_free_memory("panic");
+            previous_hook(info);
+        }));
+        let running = Arc::clone(&memory_running);
+        std::thread::Builder::new()
+            .name("vita-memory".into())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let interval = std::time::Duration::from_secs(seconds.max(1) as u64);
+                let mut deadline = Instant::now() + interval;
+                while running.load(Ordering::Relaxed) {
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    if !running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    log_free_memory("tick");
+                    deadline += interval;
+                    if deadline <= Instant::now() {
+                        deadline = Instant::now() + interval;
+                    }
+                }
+            })
+            .expect("Cannot start Vita memory logger");
     }
 
     unsafe {
@@ -162,6 +212,8 @@ where
         sys::vglWaitVblankStart(if vsync { sys::GL_TRUE } else { sys::GL_FALSE });
     }
 
+    VGL_READY.store(true, Ordering::Release);
+
     crate::native::gl::load_gl_funcs(gl_loader::get_proc_address);
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -180,7 +232,7 @@ where
     let mut event_handler = f();
 
     let mut frames: u32 = 0;
-    let mut memory_frames: u32 = 0;
+    let mut first_swap = true;
     let mut window_start = Instant::now();
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
@@ -206,14 +258,11 @@ where
             display.update_requested = false;
             event_handler.update();
             event_handler.draw();
-            unsafe { sys::vglSwapBuffers(sys::GL_FALSE) };
-            if let Some(every) = cfg.log_memory_every {
-                memory_frames += 1;
-                if memory_frames >= every.max(1) {
-                    log_free_memory();
-                    memory_frames = 0;
-                }
+            if first_swap && cfg.log_memory_every.is_some() {
+                log_free_memory("first_swap");
+                first_swap = false;
             }
+            unsafe { sys::vglSwapBuffers(sys::GL_FALSE) };
         } else {
             // Boucle « bloquante » émulée : pas d'attente d'événement sur Vita, on scrute à ~1 kHz.
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -233,6 +282,7 @@ where
             }
         }
     }
+    memory_running.store(false, Ordering::Relaxed);
     // Pas de destruction explicite du contexte : vitaGL n'expose pas de vglEnd dans vitaGL.h
     // (dca4b9d). Le retour de main termine le processus.
 }

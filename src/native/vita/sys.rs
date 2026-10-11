@@ -18,6 +18,29 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
+// vitaGL dca4b9d: VGL_MEM_SLOW does not exist; PHYCONT is enum value 2.
+pub const VGL_MEM_VRAM: c_int = 0;
+pub const VGL_MEM_RAM: c_int = 1;
+pub const VGL_MEM_PHYCONT: c_int = 2;
+pub const VGL_MEM_BUDGET: c_int = 3;
+pub const VGL_MEM_EXTERNAL: c_int = 4;
+
+// newlib malloc.h: ten size_t fields, returned by value (ARM32 size_t = u32).
+#[repr(C)]
+#[derive(Default)]
+pub struct MallInfo {
+    pub arena: usize,
+    pub ordblks: usize,
+    pub smblks: usize,
+    pub hblks: usize,
+    pub hblkhd: usize,
+    pub usmblks: usize,
+    pub fsmblks: usize,
+    pub uordblks: usize,
+    pub fordblks: usize,
+    pub keepcost: usize,
+}
+
 pub type GLboolean = u8;
 pub const GL_FALSE: GLboolean = 0;
 pub const GL_TRUE: GLboolean = 1;
@@ -67,10 +90,18 @@ extern "C" {
     /// Change the total memory to use for internal circular pools. Default 32 MiB. Avant vglInit*.
     pub fn vglSetCircularPoolSize(size: u32);
 
+    /// Free bytes in a vitaGL pool. EXTERNAL returns 0 in dca4b9d (not measured).
+    pub fn vglMemFree(memory_type: c_int) -> usize;
+    // --- newlib (malloc.h) ---
+    pub fn mallinfo() -> MallInfo;
+
     // --- SceCtrl (psp2/ctrl.h) ---
     pub fn sceCtrlSetSamplingMode(mode: c_int) -> c_int;
-    pub fn sceCtrlPeekBufferPositive(port: c_int, pad_data: *mut SceCtrlData, count: c_int)
-        -> c_int;
+    pub fn sceCtrlPeekBufferPositive(
+        port: c_int,
+        pad_data: *mut SceCtrlData,
+        count: c_int,
+    ) -> c_int;
 
     // --- SceTouch (psp2/touch.h) ---
     pub fn sceTouchSetSamplingState(port: u32, state: u32) -> c_int;
