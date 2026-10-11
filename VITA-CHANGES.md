@@ -87,3 +87,25 @@ il faudra un backend `sceAudioOut` (jalon 6 du brief).
 (vitaGL `source/vgl.c`, `res_fallback`). The backend treated GL_FALSE as a failure and panicked on every
 successful init; found on the first on-console run of the macroquad sample (ALICEMQ01, C2-12828-1).
 Now logged on GL_TRUE, never fatal.
+
+
+## Scoped DXT5 uploads (village experiment, 2026-10-11)
+
+`native::vita::with_dxt5_uploads` opts in during creation of immutable RGBA8
+textures only. The glTexImage2D resolver uses vitaGL's runtime DXT5 encoder
+for non-null, level-zero, power-of-two images with both dimensions >=4.
+Other calls pass through unchanged. The scope is thread-local, nestable and
+restored on unwind. Dynamic textures, font atlases, render targets and textures
+used for readback must remain outside it; ordinary glTexSubImage2D updates on
+DXT storage are not supported by vitaGL. No CPU shadow copy is retained.
+The upload counters report estimated uncompressed-minus-DXT bytes, not current
+pool occupancy or confirmed successful allocation.
+
+Host guard tests with a mocked vitaGL upload (no VitaSDK required):
+
+```sh
+rustc --edition 2021 --test tests/vita_dxt5_shim.rs -o /tmp/vita-dxt5-shim-tests
+/tmp/vita-dxt5-shim-tests
+```
+
+Console validation is recorded in the parent project's DECISIONS.md.
