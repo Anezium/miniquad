@@ -515,7 +515,7 @@ impl Textures {
 }
 struct VertexInput {
     vao: GLuint,
-    layout: Vec<Option<VertexAttributeInternal>>,
+    layout: std::rc::Rc<[Option<VertexAttributeInternal>]>,
     buffers: Vec<BufferId>,
     revisions: Vec<u64>,
 }
@@ -1598,11 +1598,16 @@ impl RenderingBackend for GlContext {
         if self.info.gl_version_string.starts_with("OpenGL ES 2") { return None; }
         let layout = &self.pipelines[pipeline.0].layout;
         for (&i, input) in &self.vertex_inputs.resources {
-            if self.vertex_input_current(input) && input.layout == *layout && input.buffers == bindings.vertex_buffers {
+            if self.vertex_input_current(input) && input.layout.as_ref() == layout.as_slice() && input.buffers == bindings.vertex_buffers {
                 return Some(VertexInputId(i));
             }
         }
-        let layout = layout.clone();
+        // Thousands of immutable buffers normally share one or two layouts.
+        // Retain the resolved layout once instead of allocating it per VAO.
+        let layout = self.vertex_inputs.resources.values()
+            .find(|input| input.layout.as_ref() == layout.as_slice())
+            .map(|input| std::rc::Rc::clone(&input.layout))
+            .unwrap_or_else(|| std::rc::Rc::from(layout.as_slice()));
         self.reset_vertex_input();
         let attributes = self.cache.attributes;
         let pipeline_before = self.cache.cur_pipeline;
@@ -1638,7 +1643,7 @@ impl RenderingBackend for GlContext {
     fn apply_vertex_input(&mut self, input: VertexInputId, bindings: &Bindings) -> bool {
         let layout = &self.pipelines[self.cache.cur_pipeline.unwrap().0].layout;
         let Some(descriptor) = self.vertex_inputs.resources.get(&input.0) else { self.reset_vertex_input(); return false; };
-        if !self.vertex_input_current(descriptor) || descriptor.layout != *layout || descriptor.buffers != bindings.vertex_buffers {
+        if !self.vertex_input_current(descriptor) || descriptor.layout.as_ref() != layout.as_slice() || descriptor.buffers != bindings.vertex_buffers {
             self.reset_vertex_input(); return false;
         }
         if self.active_vertex_input != Some(input) {
