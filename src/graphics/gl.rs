@@ -1594,8 +1594,8 @@ impl RenderingBackend for GlContext {
     }
 
     fn new_vertex_input(&mut self, pipeline: Pipeline, bindings: &Bindings) -> Option<VertexInputId> {
-        // GLES2/WebGL1 need extension dispatch; keep the established fallback.
-        if self.info.gl_version_string.starts_with("OpenGL ES 2") { return None; }
+        // GlContext already creates its default VAO with these loaded entrypoints.
+        // vitaGL advertises ES 2.0 while supporting the same VAO functions.
         let layout = &self.pipelines[pipeline.0].layout;
         for (&i, input) in &self.vertex_inputs.resources {
             if self.vertex_input_current(input) && input.layout.as_ref() == layout.as_slice() && input.buffers == bindings.vertex_buffers {
