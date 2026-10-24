@@ -1097,6 +1097,10 @@ impl ContextInfo {
     }
 }
 
+/// Context-owned vertex-input descriptor. Creation/deletion is load-time work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VertexInputId(usize);
+
 pub trait RenderingBackend {
     fn info(&self) -> ContextInfo;
     /// For metal context's ShaderSource should contain MSL source string, for GL - glsl.
@@ -1327,6 +1331,20 @@ pub trait RenderingBackend {
         index_buffer: BufferId,
         textures: &[TextureId],
     );
+
+    /// Optional native vertex-input object keyed by resolved attribute layout and
+    /// vertex-buffer identities. Resources (textures/index binding) remain live.
+    fn new_vertex_input(&mut self, _pipeline: Pipeline, _bindings: &Bindings) -> Option<VertexInputId> { None }
+    fn delete_vertex_input(&mut self, _input: VertexInputId) {}
+    /// Returns false on an unsupported backend, changed layout, deleted/reuploaded
+    /// buffer, or mismatching bindings; caller then uses ordinary vertex setup.
+    fn apply_vertex_input(&mut self, _input: VertexInputId, _bindings: &Bindings) -> bool { false }
+    fn reset_vertex_input(&mut self) {}
+
+    /// Split bindings for callers that measure vertex setup separately. Backends
+    /// without split support perform all work in resources and leave vertices empty.
+    fn apply_bindings_resources(&mut self, bindings: &Bindings) { self.apply_bindings(bindings); }
+    fn apply_bindings_vertices(&mut self, _bindings: &Bindings) {}
 
     fn apply_bindings(&mut self, bindings: &Bindings) {
         self.apply_bindings_from_slice(

@@ -512,7 +512,17 @@ impl Textures {
         }
     }
 }
+struct VertexInput {
+    vao: GLuint,
+    layout: Vec<Option<VertexAttributeInternal>>,
+    buffers: Vec<BufferId>,
+    valid: bool,
+}
+
 pub struct GlContext {
+    default_vao: GLuint,
+    active_vertex_input: Option<VertexInputId>,
+    vertex_inputs: Vec<Option<VertexInput>>,
     shaders: ResourceManager<ShaderInternal>,
     pipelines: ResourceManager<PipelineInternal>,
     passes: ResourceManager<RenderPassInternal>,
@@ -543,6 +553,9 @@ impl GlContext {
             glBindVertexArray(vao);
             let info = gl_info();
             GlContext {
+                default_vao: vao,
+                active_vertex_input: None,
+                vertex_inputs: Vec::new(),
                 default_framebuffer,
                 shaders: ResourceManager::default(),
                 pipelines: ResourceManager::default(),
@@ -572,6 +585,101 @@ impl GlContext {
                     }; MAX_SHADERSTAGE_IMAGES],
                     attributes: [None; MAX_VERTEX_ATTRIBUTES],
                 },
+            }
+        }
+    }
+
+    fn apply_bindings_resources_slices(&mut self, index_buffer: BufferId, textures: &[TextureId]) {
+        let pip = &self.pipelines[self.cache.cur_pipeline.unwrap().0];
+        let shader = &self.shaders[pip.shader.0];
+
+        for (n, shader_image) in shader.images.iter().enumerate() {
+            let bindings_image = textures
+                .get(n)
+                .unwrap_or_else(|| panic!("Image count in bindings and shader did not match!"));
+            if let Some(gl_loc) = shader_image.gl_loc {
+                let texture = self.textures.get(*bindings_image);
+                let raw = match texture.raw {
+                    TextureOrRenderbuffer::Texture(id) => id,
+                    TextureOrRenderbuffer::Renderbuffer(id) => id,
+                };
+                unsafe {
+                    self.cache.bind_texture(n, texture.params.kind.into(), raw);
+                    glUniform1i(gl_loc, n as i32);
+                }
+            }
+        }
+
+        self.cache.bind_buffer(
+            GL_ELEMENT_ARRAY_BUFFER,
+            self.buffers[index_buffer.0].gl_buf,
+            self.buffers[index_buffer.0].index_type,
+        );
+
+    }
+    fn apply_bindings_vertices_slice(&mut self, vertex_buffers: &[BufferId]) {
+        self.reset_vertex_input();
+        let pip = &self.pipelines[self.cache.cur_pipeline.unwrap().0];
+
+        for attr_index in 0..MAX_VERTEX_ATTRIBUTES {
+            let cached_attr = &mut self.cache.attributes[attr_index];
+
+            let pip_attribute = pip.layout.get(attr_index).copied();
+
+            if let Some(Some(attribute)) = pip_attribute {
+                assert!(
+                    attribute.buffer_index < vertex_buffers.len(),
+                    "Attribute index outside of vertex_buffers length"
+                );
+                let vb = vertex_buffers[attribute.buffer_index];
+                let vb = self.buffers[vb.0];
+
+                if cached_attr.map_or(true, |cached_attr| {
+                    attribute != cached_attr.attribute || cached_attr.gl_vbuf != vb.gl_buf
+                }) {
+                    self.cache
+                        .bind_buffer(GL_ARRAY_BUFFER, vb.gl_buf, vb.index_type);
+
+                    unsafe {
+                        match attribute.type_ {
+                            GL_INT | GL_UNSIGNED_INT | GL_SHORT | GL_UNSIGNED_SHORT
+                            | GL_UNSIGNED_BYTE | GL_BYTE
+                                if !attribute.gl_pass_as_float =>
+                            {
+                                glVertexAttribIPointer(
+                                    attr_index as GLuint,
+                                    attribute.size,
+                                    attribute.type_,
+                                    attribute.stride,
+                                    attribute.offset as *mut _,
+                                )
+                            }
+                            _ => glVertexAttribPointer(
+                                attr_index as GLuint,
+                                attribute.size,
+                                attribute.type_,
+                                GL_FALSE as u8,
+                                attribute.stride,
+                                attribute.offset as *mut _,
+                            ),
+                        }
+                        if self.info.features.instancing {
+                            glVertexAttribDivisor(attr_index as GLuint, attribute.divisor as u32);
+                        }
+                        glEnableVertexAttribArray(attr_index as GLuint);
+                    };
+
+                    let cached_attr = &mut self.cache.attributes[attr_index];
+                    *cached_attr = Some(CachedAttribute {
+                        attribute,
+                        gl_vbuf: vb.gl_buf,
+                    });
+                }
+            } else if cached_attr.is_some() {
+                unsafe {
+                    glDisableVertexAttribArray(attr_index as GLuint);
+                }
+                *cached_attr = None;
             }
         }
     }
@@ -1339,6 +1447,7 @@ impl RenderingBackend for GlContext {
         usage: BufferUsage,
         data: BufferSource,
     ) -> BufferId {
+        self.reset_vertex_input();
         let gl_target = gl_buffer_target(&type_);
         let gl_usage = gl_usage(&usage);
         let (size, element_size) = match &data {
@@ -1393,6 +1502,10 @@ impl RenderingBackend for GlContext {
     }
 
     fn buffer_update(&mut self, buffer: BufferId, data: BufferSource) {
+        self.reset_vertex_input();
+        for input in self.vertex_inputs.iter_mut().flatten() {
+            if input.buffers.contains(&buffer) { input.valid = false; }
+        }
         let data = match data {
             BufferSource::Slice(data) => data,
             _ => panic!("buffer_update expects BufferSource::slice"),
@@ -1441,6 +1554,10 @@ impl RenderingBackend for GlContext {
     /// There is no protection against using deleted textures later. However its not an UB in OpenGl and thats why
     /// this function is not marked as unsafe
     fn delete_buffer(&mut self, buffer: BufferId) {
+        self.reset_vertex_input();
+        for input in self.vertex_inputs.iter_mut().flatten() {
+            if input.buffers.contains(&buffer) { input.valid = false; }
+        }
         unsafe { glDeleteBuffers(1, &self.buffers[buffer.0].gl_buf as *const _) }
         self.cache.clear_buffer_bindings();
         self.cache.clear_vertex_attributes();
@@ -1469,95 +1586,88 @@ impl RenderingBackend for GlContext {
         index_buffer: BufferId,
         textures: &[TextureId],
     ) {
-        let pip = &self.pipelines[self.cache.cur_pipeline.unwrap().0];
-        let shader = &self.shaders[pip.shader.0];
+        self.reset_vertex_input();
+        self.apply_bindings_resources_slices(index_buffer, textures);
+        self.apply_bindings_vertices_slice(vertex_buffers);
+    }
 
-        for (n, shader_image) in shader.images.iter().enumerate() {
-            let bindings_image = textures
-                .get(n)
-                .unwrap_or_else(|| panic!("Image count in bindings and shader did not match!"));
-            if let Some(gl_loc) = shader_image.gl_loc {
-                let texture = self.textures.get(*bindings_image);
-                let raw = match texture.raw {
-                    TextureOrRenderbuffer::Texture(id) => id,
-                    TextureOrRenderbuffer::Renderbuffer(id) => id,
-                };
-                unsafe {
-                    self.cache.bind_texture(n, texture.params.kind.into(), raw);
-                    glUniform1i(gl_loc, n as i32);
+    fn new_vertex_input(&mut self, pipeline: Pipeline, bindings: &Bindings) -> Option<VertexInputId> {
+        // GLES2/WebGL1 need extension dispatch; keep the established fallback.
+        if self.info.gl_version_string.starts_with("OpenGL ES 2") { return None; }
+        let layout = &self.pipelines[pipeline.0].layout;
+        for (i, input) in self.vertex_inputs.iter().enumerate() {
+            if let Some(input) = input {
+                if input.valid && input.layout == *layout && input.buffers == bindings.vertex_buffers {
+                    return Some(VertexInputId(i));
                 }
             }
         }
-
-        self.cache.bind_buffer(
-            GL_ELEMENT_ARRAY_BUFFER,
-            self.buffers[index_buffer.0].gl_buf,
-            self.buffers[index_buffer.0].index_type,
-        );
-
-        let pip = &self.pipelines[self.cache.cur_pipeline.unwrap().0];
-
-        for attr_index in 0..MAX_VERTEX_ATTRIBUTES {
-            let cached_attr = &mut self.cache.attributes[attr_index];
-
-            let pip_attribute = pip.layout.get(attr_index).copied();
-
-            if let Some(Some(attribute)) = pip_attribute {
-                assert!(
-                    attribute.buffer_index < vertex_buffers.len(),
-                    "Attribute index outside of vertex_buffers length"
-                );
-                let vb = vertex_buffers[attribute.buffer_index];
-                let vb = self.buffers[vb.0];
-
-                if cached_attr.map_or(true, |cached_attr| {
-                    attribute != cached_attr.attribute || cached_attr.gl_vbuf != vb.gl_buf
-                }) {
-                    self.cache
-                        .bind_buffer(GL_ARRAY_BUFFER, vb.gl_buf, vb.index_type);
-
-                    unsafe {
-                        match attribute.type_ {
-                            GL_INT | GL_UNSIGNED_INT | GL_SHORT | GL_UNSIGNED_SHORT
-                            | GL_UNSIGNED_BYTE | GL_BYTE
-                                if !attribute.gl_pass_as_float =>
-                            {
-                                glVertexAttribIPointer(
-                                    attr_index as GLuint,
-                                    attribute.size,
-                                    attribute.type_,
-                                    attribute.stride,
-                                    attribute.offset as *mut _,
-                                )
-                            }
-                            _ => glVertexAttribPointer(
-                                attr_index as GLuint,
-                                attribute.size,
-                                attribute.type_,
-                                GL_FALSE as u8,
-                                attribute.stride,
-                                attribute.offset as *mut _,
-                            ),
-                        }
-                        if self.info.features.instancing {
-                            glVertexAttribDivisor(attr_index as GLuint, attribute.divisor as u32);
-                        }
-                        glEnableVertexAttribArray(attr_index as GLuint);
-                    };
-
-                    let cached_attr = &mut self.cache.attributes[attr_index];
-                    *cached_attr = Some(CachedAttribute {
-                        attribute,
-                        gl_vbuf: vb.gl_buf,
-                    });
-                }
-            } else if cached_attr.is_some() {
-                unsafe {
-                    glDisableVertexAttribArray(attr_index as GLuint);
-                }
-                *cached_attr = None;
-            }
+        let layout = layout.clone();
+        self.reset_vertex_input();
+        let attributes = self.cache.attributes;
+        let pipeline_before = self.cache.cur_pipeline;
+        let vertex_before = self.cache.vertex_buffer;
+        let index_before = self.cache.index_buffer;
+        let index_type_before = self.cache.index_type;
+        let mut vao = 0;
+        unsafe { glGenVertexArrays(1, &mut vao); glBindVertexArray(vao); }
+        // The dynamic attribute cache belongs exclusively to default_vao.
+        self.cache.attributes = [None; MAX_VERTEX_ATTRIBUTES];
+        self.cache.cur_pipeline = Some(pipeline);
+        self.apply_bindings_vertices_slice(&bindings.vertex_buffers);
+        unsafe {
+            glBindVertexArray(self.default_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, vertex_before);
         }
+        self.cache.attributes = attributes;
+        self.cache.cur_pipeline = pipeline_before;
+        self.cache.vertex_buffer = vertex_before;
+        self.cache.index_buffer = index_before;
+        self.cache.index_type = index_type_before;
+        let id = VertexInputId(self.vertex_inputs.len());
+        self.vertex_inputs.push(Some(VertexInput { vao, layout, buffers: bindings.vertex_buffers.clone(), valid: true }));
+        Some(id)
+    }
+
+    fn delete_vertex_input(&mut self, input: VertexInputId) {
+        self.reset_vertex_input();
+        if let Some(input) = self.vertex_inputs.get_mut(input.0).and_then(Option::take) {
+            unsafe { glDeleteVertexArrays(1, &input.vao); }
+        }
+        // Release map-owned trailing slots; handles are never reused while live.
+        while self.vertex_inputs.last().is_some_and(Option::is_none) { self.vertex_inputs.pop(); }
+    }
+
+    fn apply_vertex_input(&mut self, input: VertexInputId, bindings: &Bindings) -> bool {
+        let layout = &self.pipelines[self.cache.cur_pipeline.unwrap().0].layout;
+        let Some(Some(descriptor)) = self.vertex_inputs.get(input.0) else { self.reset_vertex_input(); return false; };
+        if !descriptor.valid || descriptor.layout != *layout || descriptor.buffers != bindings.vertex_buffers {
+            self.reset_vertex_input(); return false;
+        }
+        if self.active_vertex_input != Some(input) {
+            unsafe { glBindVertexArray(descriptor.vao); }
+            self.active_vertex_input = Some(input);
+            // GL_ELEMENT_ARRAY_BUFFER is VAO-local. Force the unchanged live
+            // resource binding after selection, even when the software ID agrees.
+            self.cache.index_buffer = 0;
+            self.cache.index_type = None;
+        }
+        true
+    }
+
+    fn reset_vertex_input(&mut self) {
+        if self.active_vertex_input.take().is_some() {
+            unsafe { glBindVertexArray(self.default_vao); }
+            self.cache.index_buffer = 0;
+            self.cache.index_type = None;
+        }
+    }
+
+    fn apply_bindings_resources(&mut self, bindings: &Bindings) {
+        self.apply_bindings_resources_slices(bindings.index_buffer, &bindings.images);
+    }
+    fn apply_bindings_vertices(&mut self, bindings: &Bindings) {
+        self.apply_bindings_vertices_slice(&bindings.vertex_buffers);
     }
 
     fn apply_uniforms_from_bytes(&mut self, uniform_ptr: *const u8, size: usize) {
