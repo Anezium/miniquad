@@ -24,6 +24,7 @@ pub mod raw_gl {
 #[derive(Clone, Copy, Debug)]
 struct Buffer {
     gl_buf: GLuint,
+    input_revision: u64,
     #[cfg(target_os = "vita")]
     compact_stream: bool,
     buffer_type: BufferType,
@@ -516,13 +517,13 @@ struct VertexInput {
     vao: GLuint,
     layout: Vec<Option<VertexAttributeInternal>>,
     buffers: Vec<BufferId>,
-    valid: bool,
+    revisions: Vec<u64>,
 }
 
 pub struct GlContext {
     default_vao: GLuint,
     active_vertex_input: Option<VertexInputId>,
-    vertex_inputs: Vec<Option<VertexInput>>,
+    vertex_inputs: ResourceManager<VertexInput>,
     shaders: ResourceManager<ShaderInternal>,
     pipelines: ResourceManager<PipelineInternal>,
     passes: ResourceManager<RenderPassInternal>,
@@ -555,7 +556,7 @@ impl GlContext {
             GlContext {
                 default_vao: vao,
                 active_vertex_input: None,
-                vertex_inputs: Vec::new(),
+                vertex_inputs: ResourceManager::default(),
                 default_framebuffer,
                 shaders: ResourceManager::default(),
                 pipelines: ResourceManager::default(),
@@ -682,6 +683,11 @@ impl GlContext {
                 *cached_attr = None;
             }
         }
+    }
+
+    fn vertex_input_current(&self, input: &VertexInput) -> bool {
+        input.buffers.iter().zip(&input.revisions).all(|(b, revision)|
+            self.buffers.resources.get(&b.0).is_some_and(|buffer| buffer.input_revision == *revision))
     }
 
     pub fn features(&self) -> &Features {
@@ -1491,6 +1497,7 @@ impl RenderingBackend for GlContext {
 
         let buffer = Buffer {
             gl_buf,
+            input_revision: 0,
             #[cfg(target_os = "vita")]
             compact_stream,
             buffer_type: type_,
@@ -1503,9 +1510,7 @@ impl RenderingBackend for GlContext {
 
     fn buffer_update(&mut self, buffer: BufferId, data: BufferSource) {
         self.reset_vertex_input();
-        for input in self.vertex_inputs.iter_mut().flatten() {
-            if input.buffers.contains(&buffer) { input.valid = false; }
-        }
+        self.buffers[buffer.0].input_revision += 1;
         let data = match data {
             BufferSource::Slice(data) => data,
             _ => panic!("buffer_update expects BufferSource::slice"),
@@ -1555,9 +1560,6 @@ impl RenderingBackend for GlContext {
     /// this function is not marked as unsafe
     fn delete_buffer(&mut self, buffer: BufferId) {
         self.reset_vertex_input();
-        for input in self.vertex_inputs.iter_mut().flatten() {
-            if input.buffers.contains(&buffer) { input.valid = false; }
-        }
         unsafe { glDeleteBuffers(1, &self.buffers[buffer.0].gl_buf as *const _) }
         self.cache.clear_buffer_bindings();
         self.cache.clear_vertex_attributes();
@@ -1595,11 +1597,9 @@ impl RenderingBackend for GlContext {
         // GLES2/WebGL1 need extension dispatch; keep the established fallback.
         if self.info.gl_version_string.starts_with("OpenGL ES 2") { return None; }
         let layout = &self.pipelines[pipeline.0].layout;
-        for (i, input) in self.vertex_inputs.iter().enumerate() {
-            if let Some(input) = input {
-                if input.valid && input.layout == *layout && input.buffers == bindings.vertex_buffers {
-                    return Some(VertexInputId(i));
-                }
+        for (&i, input) in &self.vertex_inputs.resources {
+            if self.vertex_input_current(input) && input.layout == *layout && input.buffers == bindings.vertex_buffers {
+                return Some(VertexInputId(i));
             }
         }
         let layout = layout.clone();
@@ -1624,24 +1624,21 @@ impl RenderingBackend for GlContext {
         self.cache.vertex_buffer = vertex_before;
         self.cache.index_buffer = index_before;
         self.cache.index_type = index_type_before;
-        let id = VertexInputId(self.vertex_inputs.len());
-        self.vertex_inputs.push(Some(VertexInput { vao, layout, buffers: bindings.vertex_buffers.clone(), valid: true }));
-        Some(id)
+        let revisions = bindings.vertex_buffers.iter().map(|b| self.buffers[b.0].input_revision).collect();
+        Some(VertexInputId(self.vertex_inputs.add(VertexInput { vao, layout, buffers: bindings.vertex_buffers.clone(), revisions })))
     }
 
     fn delete_vertex_input(&mut self, input: VertexInputId) {
         self.reset_vertex_input();
-        if let Some(input) = self.vertex_inputs.get_mut(input.0).and_then(Option::take) {
+        if let Some(input) = self.vertex_inputs.resources.remove(&input.0) {
             unsafe { glDeleteVertexArrays(1, &input.vao); }
         }
-        // Release map-owned trailing slots; handles are never reused while live.
-        while self.vertex_inputs.last().is_some_and(Option::is_none) { self.vertex_inputs.pop(); }
     }
 
     fn apply_vertex_input(&mut self, input: VertexInputId, bindings: &Bindings) -> bool {
         let layout = &self.pipelines[self.cache.cur_pipeline.unwrap().0].layout;
-        let Some(Some(descriptor)) = self.vertex_inputs.get(input.0) else { self.reset_vertex_input(); return false; };
-        if !descriptor.valid || descriptor.layout != *layout || descriptor.buffers != bindings.vertex_buffers {
+        let Some(descriptor) = self.vertex_inputs.resources.get(&input.0) else { self.reset_vertex_input(); return false; };
+        if !self.vertex_input_current(descriptor) || descriptor.layout != *layout || descriptor.buffers != bindings.vertex_buffers {
             self.reset_vertex_input(); return false;
         }
         if self.active_vertex_input != Some(input) {
