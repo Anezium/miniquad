@@ -499,6 +499,14 @@ pub(crate) struct RenderPassInternal {
 }
 
 struct Textures(ResourceManager<Texture>);
+// Large scene retirements leave tombstones/high-water buckets behind. Reclaim
+// only when the live set is at most a quarter of the retained capacity; this
+// avoids rebuilding tables on ordinary per-frame resource churn.
+fn reclaim_retired_capacity<T>(resources: &mut ResourceManager<T>) {
+    if resources.resources.capacity() > resources.resources.len().saturating_mul(4).max(64) {
+        resources.resources.shrink_to_fit();
+    }
+}
 impl Textures {
     fn get(&self, texture: TextureId) -> Texture {
         match texture.0 {
@@ -1743,6 +1751,11 @@ impl RenderingBackend for GlContext {
     fn commit_frame(&mut self) {
         self.cache.clear_buffer_bindings();
         self.cache.clear_texture_bindings();
+        reclaim_retired_capacity(&mut self.buffers);
+        reclaim_retired_capacity(&mut self.pipelines);
+        reclaim_retired_capacity(&mut self.shaders);
+        reclaim_retired_capacity(&mut self.textures.0);
+        reclaim_retired_capacity(&mut self.passes);
     }
 
     fn draw(&self, base_element: i32, num_elements: i32, num_instances: i32) {
@@ -1781,6 +1794,18 @@ impl RenderingBackend for GlContext {
 #[cfg(test)]
 mod texture_lifetime_tests {
     use super::*;
+    #[test]
+    fn retired_table_capacity_is_reclaimed_without_losing_live_ids() {
+        let mut records = ResourceManager::default();
+        let survivor = records.add(7);
+        for _ in 0..30 {
+            let ids: Vec<_> = (0..8192).map(|n| records.add(n)).collect();
+            for id in ids { records.remove(id); }
+            assert_eq!(records[survivor], 7);
+            reclaim_retired_capacity(&mut records);
+            assert!(records.resources.capacity() <= 64);
+        }
+    }
     #[test]
     fn texture_metadata_is_reclaimed_and_ids_never_alias_on_repeated_reloads() {
         let mut textures = Textures(ResourceManager::default());
