@@ -498,7 +498,7 @@ pub(crate) struct RenderPassInternal {
     depth_texture: Option<TextureId>,
 }
 
-struct Textures(Vec<Texture>);
+struct Textures(ResourceManager<Texture>);
 impl Textures {
     fn get(&self, texture: TextureId) -> Texture {
         match texture.0 {
@@ -548,7 +548,7 @@ impl GlContext {
                 pipelines: ResourceManager::default(),
                 passes: ResourceManager::default(),
                 buffers: ResourceManager::default(),
-                textures: Textures(vec![]),
+                textures: Textures(ResourceManager::default()),
                 info,
                 cache: GlCache {
                     stored_index_buffer: 0,
@@ -908,14 +908,22 @@ impl RenderingBackend for GlContext {
         params: TextureParams,
     ) -> TextureId {
         let texture = Texture::new(self, access, source, params);
-        self.textures.0.push(texture);
-        TextureId(TextureIdInner::Managed(self.textures.0.len() - 1))
+        TextureId(TextureIdInner::Managed(self.textures.0.add(texture)))
     }
 
     fn delete_texture(&mut self, texture: TextureId) {
         //self.cache.clear_texture_bindings();
 
-        let t = self.textures.get(texture);
+        // Render-pass attachments and user handles can name the same texture.
+        // Retire managed metadata first: deleting an already retired ID is a
+        // no-op, and monotonic IDs cannot delete a subsequently created texture.
+        let t = match texture.0 {
+            TextureIdInner::Managed(id) => match self.textures.0.resources.remove(&id) {
+                Some(texture) => texture,
+                None => return,
+            },
+            _ => self.textures.get(texture),
+        };
         match &t.raw {
             TextureOrRenderbuffer::Texture(raw) => unsafe {
                 glDeleteTextures(1, raw as *const _);
@@ -1766,6 +1774,25 @@ impl RenderingBackend for GlContext {
                 (index_type as i32 * base_element) as *mut _,
                 num_instances,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod texture_lifetime_tests {
+    use super::*;
+    #[test]
+    fn texture_metadata_is_reclaimed_and_ids_never_alias_on_repeated_reloads() {
+        let mut textures = Textures(ResourceManager::default());
+        let mut previous = None;
+        for _ in 0..10000 {
+            let id = textures.0.add(Texture {raw: TextureOrRenderbuffer::Texture(7), params: TextureParams::default()});
+            assert!(previous.map_or(true, |old| id > old));
+            assert_eq!(textures.get(TextureId(TextureIdInner::Managed(id))).raw.texture(), Some(7));
+            textures.0.remove(id);
+            assert_eq!(textures.0.resources.len(), 0);
+            assert!(textures.0.resources.capacity() <= 8);
+            previous = Some(id);
         }
     }
 }
