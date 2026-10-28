@@ -48,6 +48,9 @@ pub struct VitaConfig {
     pub circular_pool_size: Option<u32>,
     /// Journalise le temps de frame moyen sur stderr toutes les N frames (None = jamais).
     pub log_frame_time_every: Option<u32>,
+    /// Main/render-thread-only optional census hooks. No allocator-path use.
+    pub diagnostic_active: Option<fn() -> bool>,
+    pub diagnostic_report: Option<fn(u64)>,
     /// Log kernel, newlib and vitaGL free memory at startup, before the first swap,
     /// on panic, and every N wall-clock seconds on a separate thread (also during loading).
     /// None disables logging; Some(0) uses a one-second interval.
@@ -70,6 +73,8 @@ impl Default for VitaConfig {
             ram_threshold: 0x0100_0000,
             circular_pool_size: None,
             log_frame_time_every: None,
+            diagnostic_active: None,
+            diagnostic_report: None,
             log_memory_every: Some(10),
             compact_stream_buffers: false,
             input: InputConfig::default(),
@@ -294,6 +299,7 @@ where
         if let Some(every) = cfg.log_frame_time_every {
             frames += 1;
             if frames >= every.max(1) {
+                let report_start = cfg.diagnostic_active.filter(|active| active()).map(|_| Instant::now());
                 let elapsed = window_start.elapsed();
                 eprintln!(
                     "[miniquad/vita] {} frames, {:.2} ms/frame fps={:.3} update_ms={:.3} draw_ms={:.3} swap_ms={:.3}",
@@ -307,10 +313,27 @@ where
                 phase_us = [0; 3];
                 frames = 0;
                 window_start = Instant::now();
+                if let (Some(start), Some(report)) = (report_start, cfg.diagnostic_report) {
+                    report(start.elapsed().as_nanos() as u64);
+                }
             }
         }
     }
     memory_running.store(false, Ordering::Relaxed);
     // Pas de destruction explicite du contexte : vitaGL n'expose pas de vglEnd dans vitaGL.h
     // (dca4b9d). Le retour de main termine le processus.
+}
+
+/// Actual backend commands during an explicitly armed render-thread scope:
+/// draws, texture binds, sampler uniform sets, vertex attribute layout changes.
+static mut DIAGNOSTIC_COMMANDS: Option<[u64; 4]> = None;
+/// Caller must serialize begin/end and all graphics calls on the render thread.
+pub unsafe fn begin_diagnostic_commands() { DIAGNOSTIC_COMMANDS = Some([0; 4]); }
+pub unsafe fn end_diagnostic_commands() -> [u64; 4] {
+    let result = DIAGNOSTIC_COMMANDS.unwrap_or([0; 4]);
+    DIAGNOSTIC_COMMANDS = None;
+    result
+}
+pub(crate) unsafe fn diagnostic_command(index: usize) {
+    if let Some(ref mut counts) = DIAGNOSTIC_COMMANDS { counts[index] += 1; }
 }

@@ -93,6 +93,8 @@ impl GlCache {
                 || self.textures[slot_index].texture != texture
             {
                 let target = if target == 0 { GL_TEXTURE_2D } else { target };
+                #[cfg(target_os = "vita")]
+                crate::native::vita::diagnostic_command(1);
                 glBindTexture(target, texture);
                 self.textures[slot_index] = CachedTexture { target, texture };
             }

@@ -1500,6 +1500,8 @@ impl RenderingBackend for GlContext {
                 };
                 unsafe {
                     self.cache.bind_texture(n, texture.params.kind.into(), raw);
+                    #[cfg(target_os = "vita")]
+                    crate::native::vita::diagnostic_command(2);
                     glUniform1i(gl_loc, n as i32);
                 }
             }
@@ -1533,6 +1535,8 @@ impl RenderingBackend for GlContext {
                         .bind_buffer(GL_ARRAY_BUFFER, vb.gl_buf, vb.index_type);
 
                     unsafe {
+                        #[cfg(target_os = "vita")]
+                        crate::native::vita::diagnostic_command(3);
                         match attribute.type_ {
                             GL_INT | GL_UNSIGNED_INT | GL_SHORT | GL_UNSIGNED_SHORT
                             | GL_UNSIGNED_BYTE | GL_BYTE
@@ -1775,6 +1779,8 @@ impl RenderingBackend for GlContext {
         let index_type = self.cache.index_type.expect("Unset index buffer type");
 
         unsafe {
+            #[cfg(target_os = "vita")]
+            crate::native::vita::diagnostic_command(0);
             glDrawElementsInstanced(
                 primitive_type,
                 num_elements,
